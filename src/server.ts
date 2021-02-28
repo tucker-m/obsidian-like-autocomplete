@@ -15,11 +15,14 @@ import {
 	TextDocumentPositionParams,
 	TextDocumentSyncKind,
 	InitializeResult,
+	DocumentColorRequest,
 } from 'vscode-languageserver/node';
 
 import {
 	TextDocument
 } from 'vscode-languageserver-textdocument';
+
+import * as fs from 'fs';
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -40,14 +43,15 @@ interface Note {
 }
 
 let notes: Array<Note> = [];
-let rootUri: string = '';
+let rootUri: string = '/';
 
 let hasConfigurationCapability: boolean = false;
 let hasWorkspaceFolderCapability: boolean = false;
 let hasDiagnosticRelatedInformationCapability: boolean = false;
 
 connection.onInitialize((params: InitializeParams) => {
-	rootUri = params.workspaceFolders?.[0].uri ?? params.rootUri ?? '';
+	rootUri = params.workspaceFolders?.[0].uri ?? params.rootUri ?? '/';
+	//rootUri.replace('file://', '');
 
 	let capabilities = params.capabilities;
 	// Does the client support the `workspace/configuration` request?
@@ -83,6 +87,39 @@ connection.onInitialize((params: InitializeParams) => {
 	return result;
 });
 
+interface MarkdownFile {
+	uri: string,
+	getText: () => string
+};
+
+const getAllFiles = function(dir: string, count: number) {
+	console.log(count);
+	if (count > 1000) {
+		return [];
+	}
+	let allFiles: Array<string> = [];
+	let files = fs.readdirSync(dir, {withFileTypes: true});
+	files.forEach((file) => {
+		if (file.name.startsWith('.') || file.isSymbolicLink()) {
+			return;
+		}
+		const dirWithSlash = dir.endsWith('/') ? dir : dir + '/';
+		const currentLocation = dirWithSlash + file.name;
+		if (fs.statSync(currentLocation).isDirectory()) {
+			count = count + 1;
+			const subDirFiles = getAllFiles(currentLocation, allFiles.length + count);
+			allFiles = allFiles.concat(subDirFiles);
+		}
+		else {
+			if (file.name.endsWith('.md')) {
+				allFiles.push(currentLocation);
+			}
+		}
+	})
+
+	return allFiles;
+}
+
 connection.onInitialized(() => {
 	if (hasConfigurationCapability) {
 		// Register for all configuration changes.
@@ -93,6 +130,17 @@ connection.onInitialized(() => {
 			connection.console.log('Workspace folder change event received.');
 		});
 	}
+
+	const allFiles = getAllFiles('/Users/tmcknight/repos/obsidian', 0);
+	allFiles.forEach((file) => {
+		const textDocument: MarkdownFile = {
+			uri: file,
+			getText: () => {
+				return fs.readFileSync(file, 'utf8');
+			}
+		}
+		addNoteToList(textDocument);
+	})
 });
 
 // The example settings
@@ -120,7 +168,7 @@ connection.onDidChangeConfiguration(change => {
 	}
 
 	// Revalidate all open text documents
-	documents.all().forEach(validateTextDocument);
+	documents.all().forEach(addNoteToList);
 });
 
 function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
@@ -147,12 +195,11 @@ documents.onDidClose(e => {
 // when the text document first opened or when its content has changed.
 documents.onDidChangeContent(change => {
   addNoteToList(change.document);
-	validateTextDocument(change.document);
 });
 
-async function addNoteToList(textDocument: TextDocument): Promise<void> {
+async function addNoteToList(textDocument: MarkdownFile): Promise<void> {
   let filename = textDocument.uri.replace(rootUri, '');
-  const extensionToRemove = '.txt';
+  const extensionToRemove = '.md';
   if (filename.endsWith(extensionToRemove)) {
 	const fileExtPosition = filename.lastIndexOf(extensionToRemove);
 	filename = filename.substr(0, fileExtPosition);
@@ -173,7 +220,7 @@ async function addNoteToList(textDocument: TextDocument): Promise<void> {
   findHeadingsInDocument(textDocument, addHeadingsToNote);
 }
 
-async function findHeadingsInDocument(textDocument: TextDocument, addToNote: Function) : Promise<void> {
+async function findHeadingsInDocument(textDocument: MarkdownFile, addToNote: Function) : Promise<void> {
   const textContent = textDocument.getText();
   const textArrayOnNewlines = textContent.split('\n');
   const re = /^(#+) (.+)/g
@@ -188,53 +235,6 @@ async function findHeadingsInDocument(textDocument: TextDocument, addToNote: Fun
   });
 
   addToNote(matches);
-}
-
-async function validateTextDocument(textDocument: TextDocument): Promise<void> {
-	// In this simple example we get the settings for every validate run.
-	// let settings = await getDocumentSettings(textDocument.uri);
-
-	// The validator creates diagnostics for all uppercase words length 2 and more
-	let text = textDocument.getText();
-	let pattern = /\b[A-Z]{2,}\b/g;
-	let m: RegExpExecArray | null;
-
-	let problems = 0;
-	let diagnostics: Diagnostic[] = [];
-	while ((m = pattern.exec(text)) && problems < 300) {
-		problems++;
-		let diagnostic: Diagnostic = {
-			severity: DiagnosticSeverity.Warning,
-			range: {
-				start: textDocument.positionAt(m.index),
-				end: textDocument.positionAt(m.index + m[0].length)
-			},
-			message: `${m[0]} is all uppercase.`,
-			source: 'ex'
-		};
-		if (hasDiagnosticRelatedInformationCapability) {
-			diagnostic.relatedInformation = [
-				{
-					location: {
-						uri: textDocument.uri,
-						range: Object.assign({}, diagnostic.range)
-					},
-					message: 'Spelling matters'
-				},
-				{
-					location: {
-						uri: textDocument.uri,
-						range: Object.assign({}, diagnostic.range)
-					},
-					message: 'Particularly for names'
-				}
-			];
-		}
-		diagnostics.push(diagnostic);
-	}
-
-	// Send the computed diagnostics to VSCode.
-	connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
 }
 
 connection.onDidChangeWatchedFiles(_change => {
